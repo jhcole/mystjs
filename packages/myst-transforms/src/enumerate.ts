@@ -56,8 +56,9 @@ type TargetNodes = Container | Math | Heading;
 type IdentifierNodes = { type: string; identifier: string };
 
 type Target = {
-  node: TargetNodes;
   kind: TargetKind | string;
+  node: TargetNodes;
+  offset?: number;
 };
 
 type TargetCounts = {
@@ -197,10 +198,15 @@ export function formatHeadingEnumerator(counts: (number | null)[], prefix?: stri
   return out;
 }
 
+export type TargetOptions = {
+  identifier?: string;
+  offset?: number;
+};
+
 export interface IReferenceState {
   file?: VFile;
   initializeNumberedHeadingDepths: (tree: Root) => void;
-  addTarget: (node: TargetNodes) => void;
+  addTarget: (node: TargetNodes, opts?: TargetOptions) => void;
   /**
    * If the page is provided, it will only look at that page.
    */
@@ -237,7 +243,7 @@ export class ReferenceState implements IReferenceState {
     this.file = opts?.file;
   }
 
-  addTarget(node: TargetNodes) {
+  addTarget(node: TargetNodes, options?: TargetOptions) {
     const possibleIncorrectNode = node as IdentifierNodes;
     if (
       possibleIncorrectNode.type === 'crossReference' ||
@@ -253,14 +259,19 @@ export class ReferenceState implements IReferenceState {
     const kind = kindFromNode(node);
     const numberNode = shouldEnumerate(node, kind, this.numbering, this.numberAll);
     let enumerator = null;
-    if (node.enumerated !== false && numberNode) {
-      enumerator = this.incrementCount(node, kind as TargetKind);
+    if (!options?.identifier && node.enumerated !== false && numberNode) {
+      enumerator = this.incrementCount(
+        node,
+        kind as TargetKind,
+        (node as any).enumeratorSize as number | undefined,
+      );
       node.enumerator = enumerator;
     }
     if (!(node as any).html_id) {
       (node as any).html_id = createHtmlId(node.identifier);
     }
-    if (node.identifier && this.targets[node.identifier]) {
+    const id = options?.identifier ?? node.identifier;
+    if (id && this.targets[id]) {
       if (!this.file) return;
       if ((node as any).implicit) return; // Do not warn on implicit headings
       fileWarn(
@@ -273,9 +284,10 @@ export class ReferenceState implements IReferenceState {
       );
       return;
     }
-    if (node.identifier) {
-      this.targets[node.identifier] = {
+    if (id) {
+      this.targets[id] = {
         node,
+        offset: options?.offset,
         kind: kind as TargetKind,
       };
     }
@@ -291,20 +303,26 @@ export class ReferenceState implements IReferenceState {
     );
   }
 
-  incrementCount(node: TargetNodes, kind: TargetKind | string): string {
+  incrementCount(node: TargetNodes, kind: TargetKind | string, enumeratorSize = 1): string {
     if (kind === TargetKind.heading && node.type === 'heading') {
       // Ideally initializeNumberedHeadingDepths is called before incrementing
-      // heading count to do a better job initializng headers based on tree
+      // heading count to do a better job initializing headers based on tree
       if (!this.targetCounts.heading) this.targetCounts.heading = [0, 0, 0, 0, 0, 0];
       this.targetCounts.heading = incrementHeadingCounts(node.depth, this.targetCounts.heading);
       return formatHeadingEnumerator(this.targetCounts.heading, this.numbering.enumerator);
     }
+    const before = this.targetCounts[kind] ?? 1;
     if (kind in this.targetCounts) {
-      this.targetCounts[kind] += 1;
+      this.targetCounts[kind] += enumeratorSize;
     } else {
-      this.targetCounts[kind] = 1;
+      this.targetCounts[kind] = enumeratorSize;
     }
-    const enumerator = this.targetCounts[kind];
+    // const enumerator =
+    //   enumeratorSize === 1
+    //     ? String(this.targetCounts[kind])
+    //     : `${before + 1}–${this.targetCounts[kind]}`;
+    if (enumeratorSize > 1) (node as any).startingNumber = before + 1;
+    const enumerator = String(before + 1);
     const prefix = this.numbering.enumerator;
     const out = prefix ? prefix.replace(/%s/g, String(enumerator)) : String(enumerator);
     return out;
@@ -341,7 +359,14 @@ export class ReferenceState implements IReferenceState {
         copyNode(target.node as Heading).children as PhrasingContent[],
       );
     } else if (target.kind === TargetKind.equation) {
-      fillReferenceEnumerators(this.file, node, '(%s)', target.node.enumerator);
+      fillReferenceEnumerators(
+        this.file,
+        node,
+        '(%s)',
+        target.offset
+          ? (target.node as any).startingNumber + target.offset
+          : target.node.enumerator,
+      );
     } else {
       // By default look into the caption paragraph if it exists
       const caption = select('caption > paragraph', target.node) as Paragraph | null;
@@ -394,8 +419,8 @@ export class MultiPageReferenceState implements IReferenceState {
     return pageXRefs;
   }
 
-  addTarget(node: TargetNodes) {
-    return this.fileState.addTarget(node);
+  addTarget(node: TargetNodes, options?: TargetOptions) {
+    return this.fileState.addTarget(node, options);
   }
 
   initializeNumberedHeadingDepths(tree: Root) {
@@ -429,6 +454,9 @@ export const enumerateTargetsTransform = (tree: Root, opts: StateOptions) => {
   )[];
   nodes.forEach((node) => {
     opts.state.addTarget(node as TargetNodes);
+    (node as any).identifiers?.map((identifier: string, index: number) =>
+      opts.state.addTarget(node as TargetNodes, { identifier, offset: index + 1 }),
+    );
   });
   return tree;
 };
